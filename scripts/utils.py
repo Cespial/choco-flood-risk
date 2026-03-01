@@ -598,6 +598,197 @@ def monitor_tasks(tasks: List[ee.batch.Task], poll_interval_s: int = 30) -> None
 # MODULE SELF-TEST
 # ===========================================================================
 
+# ============================================================================
+# ADDITIONAL HELPERS (paths, I/O, visualization)
+# ============================================================================
+
+import pathlib as _pathlib
+import sys as _sys
+
+# Add project root to path for gee_config imports
+_PROJECT_ROOT = _pathlib.Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PROJECT_ROOT))
+
+try:
+    import gee_config as _cfg
+    OUTPUTS_DIR = _cfg.OUTPUTS_DIR
+    FIGURES_DIR = _cfg.FIGURES_DIR
+    TABLES_DIR = _cfg.TABLES_DIR
+    OVERLEAF_DIR = _cfg.OVERLEAF_DIR
+except Exception:
+    OUTPUTS_DIR = _PROJECT_ROOT / "outputs"
+    FIGURES_DIR = OUTPUTS_DIR / "figures"
+    TABLES_DIR = OUTPUTS_DIR / "tables"
+    OVERLEAF_DIR = _PROJECT_ROOT / "overleaf"
+
+OVERLEAF_FIGURES = OVERLEAF_DIR / "figures"
+OVERLEAF_TABLES = OVERLEAF_DIR / "tables"
+BOUNDARIES_DIR = _PROJECT_ROOT / "data" / "boundaries"
+
+# Coordinate reference systems
+CRS_WGS84 = "EPSG:4326"
+CRS_COLOMBIA = "EPSG:3116"  # MAGNA-SIRGAS / Colombia Bogota zone
+
+# Publication figure sizes (mm and inches)
+SINGLE_COL_MM = 89
+DOUBLE_COL_MM = 183
+MM_TO_INCH = 1.0 / 25.4
+
+# Department reference area
+CHOCO_AREA_KM2 = 46530
+CHOCO_AREA_TOLERANCE = 0.10  # ±10%
+# Alias for backwards compatibility with renamed scripts
+choco_AREA_KM2 = CHOCO_AREA_KM2
+choco_AREA_TOLERANCE = CHOCO_AREA_TOLERANCE
+
+
+def ensure_dirs(*dirs) -> None:
+    """Create directories if they don't exist."""
+    for d in dirs:
+        _pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+
+
+def save_dataframe(df, path, fmt="csv", **kwargs):
+    """Save a pandas DataFrame to CSV or LaTeX."""
+    import pandas as pd
+    p = _pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "csv":
+        df.to_csv(p, index=kwargs.pop("index", False), **kwargs)
+    elif fmt == "latex":
+        df.to_latex(p, index=kwargs.pop("index", False), **kwargs)
+    _log.info("Saved %s (%d rows)", p.name, len(df))
+
+
+def load_results(name: str, subdir: str = ""):
+    """Load a CSV results file from the outputs directory."""
+    import pandas as pd
+    if subdir:
+        path = OUTPUTS_DIR / subdir / name
+    else:
+        path = OUTPUTS_DIR / name
+    if not path.exists():
+        _log.warning("Results file not found: %s", path)
+        return None
+    return pd.read_csv(path)
+
+
+def figsize_single(aspect: float = 0.75):
+    """Return (width, height) in inches for a single-column figure."""
+    w = SINGLE_COL_MM * MM_TO_INCH
+    return (w, w * aspect)
+
+
+def figsize_double(aspect: float = 0.5):
+    """Return (width, height) in inches for a double-column figure."""
+    w = DOUBLE_COL_MM * MM_TO_INCH
+    return (w, w * aspect)
+
+
+def set_publication_style():
+    """Set matplotlib rcParams for publication-quality figures."""
+    try:
+        import matplotlib.pyplot as plt
+        plt.rcParams.update({
+            "font.family": "serif",
+            "font.size": 8,
+            "axes.labelsize": 9,
+            "axes.titlesize": 10,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 7,
+            "figure.dpi": 150,
+            "savefig.dpi": 600,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.05,
+        })
+    except ImportError:
+        pass
+
+
+def save_figure(fig, name: str, dirs=None, formats=None):
+    """Save a matplotlib figure to multiple directories and formats."""
+    if formats is None:
+        formats = ["pdf", "png"]
+    if dirs is None:
+        dirs = [FIGURES_DIR, OVERLEAF_FIGURES]
+    for d in dirs:
+        _pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+        for fmt in formats:
+            path = _pathlib.Path(d) / f"{name}.{fmt}"
+            fig.savefig(path, format=fmt)
+    _log.info("Figure saved: %s (%s)", name, ", ".join(formats))
+
+
+def load_department_boundary(source: str = "gadm"):
+    """Load department boundary as a GeoDataFrame."""
+    try:
+        import geopandas as gpd
+        if source == "gadm":
+            gadm_path = BOUNDARIES_DIR / "gadm41_COL_1.shp"
+            if gadm_path.exists():
+                gdf = gpd.read_file(gadm_path)
+                return gdf[gdf["NAME_1"].str.contains("Choc", case=False, na=False)]
+        # Fallback: try to download from GADM
+        _log.warning("Boundary file not found at %s", gadm_path)
+        return None
+    except ImportError:
+        _log.warning("geopandas not available")
+        return None
+
+
+def load_municipalities():
+    """Load municipal boundaries as a GeoDataFrame."""
+    try:
+        import geopandas as gpd
+        gadm_path = BOUNDARIES_DIR / "gadm41_COL_2.shp"
+        if gadm_path.exists():
+            gdf = gpd.read_file(gadm_path)
+            return gdf[gdf["NAME_1"].str.contains("Choc", case=False, na=False)]
+        _log.warning("Municipal boundary file not found: %s", gadm_path)
+        return None
+    except ImportError:
+        _log.warning("geopandas not available")
+        return None
+
+
+def load_subregions():
+    """Return subregion definitions from gee_config."""
+    try:
+        return _cfg.SUBREGIONS
+    except Exception:
+        return {}
+
+
+def load_river_basins():
+    """Placeholder for loading river basin geometries."""
+    _log.warning("load_river_basins: not implemented, returning None")
+    return None
+
+
+def compute_area_km2(gdf):
+    """Compute area in km² for a GeoDataFrame."""
+    projected = gdf.to_crs(CRS_COLOMBIA)
+    return projected.geometry.area / 1e6
+
+
+def validate_department_area(area_km2: float, expected: float = None,
+                             tolerance: float = None) -> bool:
+    """Check if computed area is within tolerance of expected."""
+    if expected is None:
+        expected = CHOCO_AREA_KM2
+    if tolerance is None:
+        tolerance = CHOCO_AREA_TOLERANCE
+    lower = expected * (1 - tolerance)
+    upper = expected * (1 + tolerance)
+    ok = lower <= area_km2 <= upper
+    if not ok:
+        _log.warning("Area %.1f km² outside expected range [%.1f, %.1f]",
+                     area_km2, lower, upper)
+    return ok
+
+
 def _self_test() -> None:
     """Quick smoke test: verify GEE connectivity and study area loading."""
     _log.info("Running utils self-test ...")
